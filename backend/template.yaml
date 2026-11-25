@@ -1,0 +1,157 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: FareWatch - serverless flight price tracker with price-drop alerts (Python)
+
+Parameters:
+  AlertEmail: { Type: String, Description: Email subscribed to price alerts }
+  CheckSchedule: { Type: String, Default: "rate(1 hour)" }
+
+Globals:
+  Function:
+    Runtime: python3.12
+    CodeUri: .
+    Architectures: [arm64]
+    MemorySize: 256
+    Timeout: 10
+    Tracing: Active
+    Environment: { Variables: { TABLE: !Ref FareTable } }
+
+Resources:
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: farewatch-users
+      UsernameAttributes: [email]
+      AutoVerifiedAttributes: [email]
+      Policies: { PasswordPolicy: { MinimumLength: 8, RequireNumbers: true, RequireUppercase: true, RequireLowercase: true, RequireSymbols: false } }
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      UserPoolId: !Ref UserPool
+      GenerateSecret: false
+      ExplicitAuthFlows: [ALLOW_USER_PASSWORD_AUTH, ALLOW_USER_SRP_AUTH, ALLOW_REFRESH_TOKEN_AUTH]
+      PreventUserExistenceErrors: ENABLED
+
+  Api:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      CorsConfiguration: { AllowOrigins: ["*"], AllowHeaders: [authorization, content-type], AllowMethods: [GET, POST, DELETE, OPTIONS] }
+      DefaultRouteSettings: { ThrottlingBurstLimit: 50, ThrottlingRateLimit: 20 }
+      Auth:
+        DefaultAuthorizer: CognitoJwt
+        Authorizers:
+          CognitoJwt:
+            IdentitySource: $request.header.Authorization
+            JwtConfiguration:
+              issuer: !Sub https://cognito-idp.${AWS::Region}.amazonaws.com/${UserPool}
+              audience: [!Ref UserPoolClient]
+
+  FareTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: PK, AttributeType: S }
+        - { AttributeName: SK, AttributeType: S }
+        - { AttributeName: active, AttributeType: S }
+        - { AttributeName: departDate, AttributeType: S }
+      KeySchema: [{ AttributeName: PK, KeyType: HASH }, { AttributeName: SK, KeyType: RANGE }]
+      GlobalSecondaryIndexes:
+        - IndexName: activeWatches
+          KeySchema: [{ AttributeName: active, KeyType: HASH }, { AttributeName: departDate, KeyType: RANGE }]
+          Projection: { ProjectionType: ALL }
+      TimeToLiveSpecification: { AttributeName: ttl, Enabled: true }
+      StreamSpecification: { StreamViewType: NEW_AND_OLD_IMAGES }
+      SSESpecification: { SSEEnabled: true }
+      PointInTimeRecoverySpecification: { PointInTimeRecoveryEnabled: true }
+
+  PriceTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: farewatch-price-alerts
+      KmsMasterKeyId: alias/aws/sns
+      Subscription: [{ Protocol: email, Endpoint: !Ref AlertEmail }]
+  AlerterDLQ:
+    Type: AWS::SQS::Queue
+    Properties: { MessageRetentionPeriod: 1209600, SqsManagedSseEnabled: true }
+
+  CreateWatchFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: src/functions/create_watch.handler
+      Policies: [{ DynamoDBCrudPolicy: { TableName: !Ref FareTable } }]
+      Events: { Api: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: "/watches", Method: POST } } }
+  ListWatchesFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: src/functions/list_watches.handler
+      Policies: [{ DynamoDBReadPolicy: { TableName: !Ref FareTable } }]
+      Events: { Api: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: "/watches", Method: GET } } }
+  GetWatchFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: src/functions/get_watch.handler
+      Policies: [{ DynamoDBReadPolicy: { TableName: !Ref FareTable } }]
+      Events: { Api: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: "/watches/{id}", Method: GET } } }
+  DeleteWatchFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: src/functions/delete_watch.handler
+      Policies: [{ DynamoDBCrudPolicy: { TableName: !Ref FareTable } }]
+      Events: { Api: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: "/watches/{id}", Method: DELETE } } }
+  CheckNowFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: src/functions/check_now.handler
+      Policies: [{ DynamoDBCrudPolicy: { TableName: !Ref FareTable } }]
+      Events: { Api: { Type: HttpApi, Properties: { ApiId: !Ref Api, Path: "/watches/{id}/check", Method: POST } } }
+
+  ScheduledCheckerFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: src/functions/scheduled_checker.handler
+      Timeout: 300
+      ReservedConcurrentExecutions: 1
+      Policies: [{ DynamoDBCrudPolicy: { TableName: !Ref FareTable } }]
+      Events: { Hourly: { Type: Schedule, Properties: { Schedule: !Ref CheckSchedule } } }
+
+  PriceAlerterFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: src/functions/price_alerter.handler
+      Environment: { Variables: { TOPIC_ARN: !Ref PriceTopic } }
+      Policies:
+        - SNSPublishMessagePolicy: { TopicName: !GetAtt PriceTopic.TopicName }
+        - SQSSendMessagePolicy: { QueueName: !GetAtt AlerterDLQ.QueueName }
+      Events:
+        Stream:
+          Type: DynamoDB
+          Properties:
+            Stream: !GetAtt FareTable.StreamArn
+            StartingPosition: LATEST
+            BatchSize: 50
+            MaximumRetryAttempts: 3
+            FunctionResponseTypes: [ReportBatchItemFailures]
+            DestinationConfig: { OnFailure: { Destination: !GetAtt AlerterDLQ.Arn } }
+            FilterCriteria:
+              Filters: [{ Pattern: '{"eventName":["MODIFY"],"dynamodb":{"Keys":{"SK":{"S":[{"prefix":"WATCH#"}]}}}}' }]
+
+  CheckerErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Scheduled price check failing
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions: [{ Name: FunctionName, Value: !Ref ScheduledCheckerFn }]
+      Statistic: Sum
+      Period: 3600
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref PriceTopic]
+
+Outputs:
+  ApiUrl: { Value: !Sub "https://${Api}.execute-api.${AWS::Region}.amazonaws.com" }
+  UserPoolId: { Value: !Ref UserPool }
+  UserPoolClientId: { Value: !Ref UserPoolClient }
