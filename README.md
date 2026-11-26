@@ -263,3 +263,36 @@ OK
 Robbhedonic
 
 Repository: https://github.com/Robbhedonic/farewatch-serverless
+
+## AWS deployment evidence
+
+The following screenshots document the deployed infrastructure and tested serverless flows:
+
+| Screenshot | AWS evidence |
+|---|---|
+| `01-lambda-scheduled-check-test.jpeg` | Successful manual invocation of the scheduled Lambda |
+| `02-cloudwatch-check-run.jpeg` | CloudWatch log showing checked and failed watches |
+| `03-dynamodb-watch-history.jpeg` | Watch and price-history items stored in DynamoDB |
+| `04-api-gateway-routes.jpeg` | Five secured API Gateway routes |
+| `05-api-gateway-cognito-authorizer.jpeg` | Cognito JWT authorizer attached to the routes |
+| `06-cognito-user.jpeg` | Cognito user pool and test user |
+| `07-sns-confirmed-subscription.jpeg` | Confirmed email subscription to SNS |
+| `08-dynamodb-stream-trigger.jpeg` | DynamoDB Stream trigger for the alerter Lambda |
+| `09-sns-confirmed-subscription.jpeg` | SNS topic subscription details |
+| `10-sqs-dlq.jpeg` | Encrypted SQS dead-letter queue |
+| `11-cloudwatch-alarm.jpeg` | CloudWatch alarm for scheduled checker failures |
+| `12-cognito-user.jpeg` | Confirmed Cognito test user |
+| `13-scheduled-rule.jpeg` | EventBridge rule running every hour |
+| `14-dashboard-live-route.jpeg` | Dashboard connected to the deployed API |
+| `15-sns-alert-email.jpeg` | Price alert received by email |
+| `16-price-alerter-cloudwatch.jpeg` | Price alerter Lambda execution log |
+| `17-xray-traces.jpeg` | AWS X-Ray traces for the Lambda functions |
+| `18-api-gateway-throttling.jpeg` | API Gateway stage throttling configuration |
+| `19-api-gateway-stage.jpeg` | Deployed `$default` API stage and Invoke URL |
+| `20-cloudformation-stack.jpeg` | CloudFormation deployment overview |
+| `21-iam-lambda-role.jpeg` | Lambda execution role and IAM policies |
+| `22-cloudformation-stack.jpeg` | CloudFormation outputs and deployed resources |
+| `23-dashboard-live-route.jpeg` | Live dashboard with an ARN-to-BCN watch |
+| `23-email-alert.jpeg` | SNS price alert email evidence |
+
+All screenshots are available in the [`screenshots/`](screenshots/) directory.
