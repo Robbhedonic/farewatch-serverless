@@ -111,7 +111,6 @@ Resources:
     Properties:
       Handler: src/functions/scheduled_checker.handler
       Timeout: 300
-      ReservedConcurrentExecutions: 1
       Policies: [{ DynamoDBCrudPolicy: { TableName: !Ref FareTable } }]
       Events: { Hourly: { Type: Schedule, Properties: { Schedule: !Ref CheckSchedule } } }
 
